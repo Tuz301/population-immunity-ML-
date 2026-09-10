@@ -95,7 +95,17 @@ def main(argv: list[str] | None = None) -> int:
 
     backtest = subparsers.add_parser("backtest", help="Score the reach model on held-out rounds.")
     _add_common(backtest)
-    backtest.add_argument("--holdout", type=int, default=3, help="Trailing rounds withheld.")
+    backtest.add_argument(
+        "--holdout",
+        type=int,
+        default=2,
+        help=(
+            "Trailing rounds withheld. The history that remains must still hold six "
+            "rounds, because the reach model cuts it three ways: rounds that fit the "
+            "centre, rounds that teach the spread, and rounds that price that spread "
+            "out of sample."
+        ),
+    )
 
     validate = subparsers.add_parser(
         "validate", help="Run the engine on a simulated programme with known truth."
