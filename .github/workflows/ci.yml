@@ -1,0 +1,113 @@
+name: ci
+on: [push, pull_request]
+
+# Don't burn minutes finishing a run that a newer push already obsoleted.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---- The modelling claims -------------------------------------------
+  #
+  # These are not plumbing tests. Each one protects a property the answer
+  # depends on: that the quadrature is exact, that stickiness never makes a
+  # place look easier than it is, that the unreachable core survives every
+  # round, that immunity without campaigns settles at routine-immunisation
+  # coverage. A regression in any of them changes a round count that a
+  # programme would act on, silently.
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is what the engine was developed and validated on. 3.12 is
+        # here because the scientific stack moves fast underneath us and a
+        # NumPy or SciPy behaviour change should surface in CI, not in a run
+        # someone is about to brief on.
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Tests
+        run: pytest -q
+
+  # ---- The engine actually runs ---------------------------------------
+  #
+  # WHY THIS JOB EXISTS, SEPARATELY FROM THE TESTS ABOVE.
+  #
+  # During development every unit test passed while the assembled pipeline
+  # was broken: LightGBM refuses monotone constraints under a quantile
+  # objective, and refuses them again alongside a native categorical. Neither
+  # refusal is reachable from a unit test of the maths — both only appear when
+  # the real panel goes through the real model. A green test suite over a
+  # pipeline that cannot start is the failure this job exists to catch.
+  #
+  # So: run the engine end to end on the simulated programme and require it to
+  # produce a plan.
+  end-to-end:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Plan a simulated programme
+        run: |
+          python -m immunity_engine plan --draws 200 --interval 3 2>/dev/null \
+            | tee /tmp/plan.txt
+      - name: Assert the run produced a usable plan
+        # A run that prints a summary but reaches no verdict, or that loses the
+        # denominator provenance, is not a usable answer.
+        run: |
+          grep -q "CAMPAIGN REQUIREMENT" /tmp/plan.txt
+          grep -q "Vc adjusted" /tmp/plan.txt
+          grep -q "VERDICTS" /tmp/plan.txt
+          grep -q "does not authorise" /tmp/plan.txt
+      - name: Expert council reaches a verdict
+        run: |
+          python -m immunity_engine council --draws 200 --limit 1 2>/dev/null \
+            | tee /tmp/council.txt
+          grep -q "COUNCIL RECORD" /tmp/council.txt
+          grep -q "SYSTEMS BLOCK" /tmp/council.txt
+      - name: Backtest scores the reach model on held-out rounds
+        run: |
+          python -m immunity_engine backtest --draws 200 2>/dev/null | tee /tmp/backtest.txt
+          grep -q "Held-out unit-rounds" /tmp/backtest.txt
+
+  # ---- The answer is reproducible --------------------------------------
+  #
+  # Every figure this engine produces is Monte Carlo. If two runs of the same
+  # panel at the same seed disagree, no result can be checked by anyone, and
+  # no reviewer can reproduce a number in a briefing. The seed is part of the
+  # contract, so it is enforced here rather than trusted.
+  reproducible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Same panel, same seed, same answer
+        run: |
+          python -m immunity_engine plan --draws 300 --interval 3 2>/dev/null > /tmp/run1.txt
+          python -m immunity_engine plan --draws 300 --interval 3 2>/dev/null > /tmp/run2.txt
+          if ! diff -q /tmp/run1.txt /tmp/run2.txt; then
+            echo "::error::Two seeded runs of the same panel disagree. Results are not reproducible."
+            diff /tmp/run1.txt /tmp/run2.txt | head -40
+            exit 1
+          fi
+          echo "Reproducibility OK"
