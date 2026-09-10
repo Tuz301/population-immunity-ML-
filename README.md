@@ -2,6 +2,8 @@
 
 [![ci](https://github.com/Tuz301/population-immunity-ML-/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuz301/population-immunity-ML-/actions/workflows/ci.yml)
 
+**Repository:** https://github.com/Tuz301/population-immunity-ML-
+
 How many campaign rounds does a location need to reach population immunity — and
 where will no number of rounds do it?
 
