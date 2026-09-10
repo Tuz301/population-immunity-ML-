@@ -48,6 +48,7 @@ DEFAULT_QUANTILES: tuple[float, ...] = (0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95
 MIN_SCALE = 0.02
 
 
+
 @dataclass
 class ReachModelReport:
     """How well the reach model performed, and where it did not.
@@ -242,16 +243,43 @@ class ReachModel:
         provisional = lgb.LGBMRegressor(monotone_constraints=constraints, **self.params)
         provisional.fit(x_fit, y_fit)
 
-        # Learn the conditional spread on data the centre model has not seen, so
-        # the interval width reflects genuine error rather than residual fit.
-        x_calib = self._design(calib_part)
-        y_calib = calib_part["reach"].to_numpy()
-        residual = y_calib - provisional.predict(x_calib)
+        # The interval width is the shape of the standardised residual, and the
+        # shape has to be read off rows that taught neither model. Fitting the
+        # scale model and then dividing that model's own training residuals by its
+        # own predictions is the mistake it looks like: the scale model has partly
+        # learned those residuals, so the standardised values come out too small
+        # and every interval built from them runs narrow. The failure does not
+        # show up where it is made - coverage on the calibration slice looks
+        # correct - it shows up on the rounds a programme is actually planning.
+        #
+        # So the calibration slice is split again, by round. The earlier rounds
+        # teach the spread, the later rounds say what that spread is worth out of
+        # sample, and neither has been seen by the centre model.
+        calibration_rounds = np.sort(calib_part["round_index"].unique())
+        scale_part, shape_part = calib_part, calib_part
+        leaked = True
+        if len(calibration_rounds) >= 2:
+            shape_cut = calibration_rounds[-1]
+            candidate_scale = calib_part[calib_part["round_index"] < shape_cut]
+            candidate_shape = calib_part[calib_part["round_index"] >= shape_cut]
+            if len(candidate_scale) >= 20 and len(candidate_shape) >= 20:
+                scale_part, shape_part, leaked = candidate_scale, candidate_shape, False
 
+        x_scale = self._design(scale_part)
         self.scale = lgb.LGBMRegressor(**{**self.params, "n_estimators": 200})
-        self.scale.fit(x_calib, np.abs(residual))
-        calib_scale = np.maximum(self.scale.predict(x_calib), MIN_SCALE)
-        self.residual_quantiles = np.quantile(residual / calib_scale, self.quantiles)
+        self.scale.fit(x_scale, np.abs(scale_part["reach"].to_numpy() - provisional.predict(x_scale)))
+
+        x_shape = self._design(shape_part)
+        shape_residual = shape_part["reach"].to_numpy() - provisional.predict(x_shape)
+        shape_scale = np.maximum(self.scale.predict(x_shape), MIN_SCALE)
+        self.residual_quantiles = np.quantile(shape_residual / shape_scale, self.quantiles)
+
+        if leaked:
+            notes.append(
+                "The calibration slice held only one round, so the spread model and the "
+                "interval shape were read off the same rows. The intervals will run "
+                "narrower than they claim. Widen the panel before quoting their coverage."
+            )
 
         # Refit the centre on everything before the holdout.
         x_train = self._design(train_all)

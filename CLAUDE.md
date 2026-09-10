@@ -83,7 +83,7 @@ Neither refusal is reachable from a unit test of the maths — both only appear
 when a real panel goes through the real model. This is why CI has a separate
 end-to-end job.
 
-**Three estimator biases were found during validation.** All are fixed; all are
+**Five estimator biases were found during validation.** All are fixed; all are
 documented in `docs/METHOD.md` §8. Do not reintroduce them:
 
 - Stickiness (`rho`) from a pass-or-fail label reads far too low (0.38 against a
@@ -95,6 +95,27 @@ documented in `docs/METHOD.md` §8. Do not reintroduce them:
 - Intermittent closure is **not** a permanent unreachable core. A settlement
   closed in 6% of rounds is reachable; counting that as 6% permanently
   unreachable dropped precision on the infeasibility verdict to 47%.
+- Stickiness is also dragged down by movement it does not cause. It decides
+  *which* children a round misses, never *how many*, so round-to-round movement
+  in a settlement's own aggregate reach is not evidence about it. Removing that
+  movement lifts the estimate from 0.66 to 0.70 against a true 0.72. The
+  correction only ever pushes upward, so its direction is known.
+- Round-to-round movement measured from **one** reported stream is mostly
+  reporting noise: 22% against a true 7%. Feeding that to the simulator makes the
+  engine worse, because an inflated shock lets a draw clear the target on one
+  good round. Use the covariance of the administrative and verified streams,
+  whose errors are independent, and take the median across settlements so that
+  places which close and reopen do not set the figure for everywhere else. That
+  reads 8.4%.
+
+**Never let the spread model score its own training residuals.** The interval
+width is the shape of the standardised residual. Fitting the scale model on a
+slice and then dividing that slice's residuals by that model's own predictions
+understates them, and every interval built from it runs narrow — 71% coverage at
+a nominal 80%. The failure does not show up where it is made: coverage on the
+slice that produced it looks correct. The calibration slice is therefore split
+again by round, so the shape is read off rows that taught neither model. That
+holds all three reported levels within tolerance.
 
 **The calibration slice must match the deployment horizon.** A residual measured
 one round ahead is smaller than one measured three rounds ahead. Calibrating at

@@ -37,6 +37,7 @@ from .heterogeneity import (
     estimate_concentration,
     estimate_persistence,
     estimate_persistence_from_reach,
+    estimate_reach_wobble,
     unreachable_core,
 )
 from .reach_model import ReachModel, ReachModelReport
@@ -235,6 +236,40 @@ def estimate_unit_parameters(
         f"{np.median(list(kappa_by_lga.values())):.1f} across {len(kappa_by_lga)} LGAs."
     )
 
+    # --- round-to-round movement in reach ---------------------------------
+    # Drift is where reach is heading. This is how far it strays on the way, and
+    # the two are separate: a programme can hold a steady average and still miss
+    # one round badly enough to change how many rounds it needs. Both reported
+    # streams are used, because the movement they agree on is the round and the
+    # movement only one of them shows is reporting noise.
+    # Both streams are needed: what the two agree on is the round, what only one
+    # of them shows is reporting noise. Without verification there is no second
+    # opinion, and the single reported series cannot tell them apart.
+    if "verified_vaccinated" in panel.columns and "admin_vaccinated" in panel.columns:
+        denominator = panel["target_pop"].to_numpy(dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            admin_reach = np.where(
+                denominator > 0, panel["admin_vaccinated"] / denominator, np.nan
+            )
+            verified_reach = np.where(
+                denominator > 0, panel["verified_vaccinated"] / denominator, np.nan
+            )
+        wobble, wobble_note = estimate_reach_wobble(
+            panel["unit_id"].to_numpy(),
+            panel["round_index"].to_numpy(),
+            admin_reach,
+            verified_reach,
+            cap=config.max_reach_wobble_cv,
+        )
+    else:
+        wobble, wobble_note = 0.0, (
+            "Round-to-round reach movement not estimated: the panel carries only one "
+            "reported stream, so campaign movement cannot be told from reporting noise. "
+            "Reach is held steady between rounds and the round count has a thinner "
+            "middle than the field does."
+        )
+    notes.append(wobble_note)
+
     # --- stickiness -------------------------------------------------------
     usable = features[features["reach"].notna()]
     rho, rho_note = estimate_persistence_from_reach(
@@ -242,6 +277,7 @@ def estimate_unit_parameters(
         usable["round_index"].to_numpy(),
         usable["reach"].to_numpy(),
         verification_lot_size=lot_size,
+        campaign_wobble_cv=wobble,
     )
     notes.append(rho_note)
 
@@ -283,6 +319,7 @@ def estimate_unit_parameters(
     parameters = pd.DataFrame(
         {
             "reach_drift_per_round": drift,
+            "reach_wobble_cv": wobble,
             "pi_zero": pi_zero,
             "kappa": kappa,
             "rho": rho,
@@ -578,6 +615,7 @@ def run_pipeline(
             interval_months=planning_interval_months,
             denominator_inflation_mean=float(row["denominator_inflation"]),
             reach_drift_per_round=float(row["reach_drift_per_round"]),
+            reach_wobble_cv=float(row["reach_wobble_cv"]),
         )
         plans.append(solve_unit(inputs, config, rng=rng, require_trough=require_trough))
 

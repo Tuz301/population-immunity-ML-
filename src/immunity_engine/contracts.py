@@ -318,6 +318,16 @@ class EngineConfig:
     """Lower bound on the cumulative drift factor. Fatigue plateaus rather than
     compounding to zero, and letting it compound would manufacture infeasibility."""
 
+    max_reach_wobble_cv: float = 0.40
+    """Cap on the measured round-to-round movement in a settlement's own reach.
+
+    Drift is where reach is heading; this is how far it strays on the way. The
+    simulator needs it because stickiness decides which children a round misses,
+    never how many, so without it every round performs exactly as well as the last
+    and a draw either clears the target early or never clears it at all. The cap
+    guards against a panel whose denominators move more than its campaigns do.
+    """
+
     max_reach_drift_per_round: float = 0.05
     """Cap on the magnitude of the estimated drift, in either direction. A larger
     measured slope is almost always a changing settlement set or a changed

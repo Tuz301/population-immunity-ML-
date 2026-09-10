@@ -91,7 +91,7 @@ def main() -> int:
     print("BACKTEST ON THE PANEL ALONE (no simulated truth used)")
     print("=" * 78)
     scored = backtest_on_panel(
-        panel, config, holdout_rounds=3, planning_interval_months=spec.forward_interval_months
+        panel, config, holdout_rounds=2, planning_interval_months=spec.forward_interval_months
     )
     print(summarise_backtest(scored))
 

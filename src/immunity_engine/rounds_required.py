@@ -56,6 +56,10 @@ class UnitInputs:
         denominator_inflation_mean: Factor by which ``target_pop`` overstates the
             true cohort. 1.0 means the denominator is believed.
         denominator_inflation_sd: Uncertainty on that factor.
+        reach_wobble_cv: Round-to-round movement in this unit's own reach, as a
+            share of its level. Without it every round performs exactly as well as
+            the last, so a draw either clears the target early or never clears it,
+            and the round-count distribution has no middle.
         reach_drift_per_round: Measured proportional change in reach with each
             successive round. Negative is fatigue.
     """
@@ -79,6 +83,7 @@ class UnitInputs:
     denominator_inflation_mean: float = 1.0
     denominator_inflation_sd: float = 0.08
     reach_drift_per_round: float = 0.0
+    reach_wobble_cv: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -354,9 +359,16 @@ def solve_unit(
     rounds_to_cross, immunity_path = simulate_rounds(
         reach_drift_per_round=inputs.reach_drift_per_round,
         drift_floor=config.reach_drift_floor,
+        reach_wobble_cv=inputs.reach_wobble_cv,
+        rng=rng,
         **simulation_kwargs,
     )
-    _, stationary_path = simulate_rounds(reach_drift_per_round=0.0, **simulation_kwargs)
+    _, stationary_path = simulate_rounds(
+        reach_drift_per_round=0.0,
+        reach_wobble_cv=inputs.reach_wobble_cv,
+        rng=rng,
+        **simulation_kwargs,
+    )
 
     # Crossings beyond the budget are not plans, so they are censored back to
     # infinity for the round-count summaries.

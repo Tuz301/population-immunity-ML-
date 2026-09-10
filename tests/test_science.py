@@ -18,6 +18,7 @@ from immunity_engine.heterogeneity import (
     beta_shapes,
     estimate_concentration,
     estimate_persistence_from_reach,
+    estimate_reach_wobble,
     unreachable_core,
 )
 from immunity_engine.immunity import (
@@ -27,6 +28,9 @@ from immunity_engine.immunity import (
     project_trajectory,
     steady_state_immunity,
 )
+from immunity_engine.adapters.synthetic import SyntheticProgramme, generate_synthetic_panel
+from immunity_engine.features import build_features
+from immunity_engine.reach_model import ReachModel
 from immunity_engine.vectorised import build_reach_grid, simulate_rounds
 
 
@@ -290,3 +294,81 @@ def test_a_reproduction_number_below_one_is_refused():
     """Below R0 = 1 there is no herd-immunity threshold, so there is no target."""
     with pytest.raises(ValueError, match="r0 must exceed 1"):
         EngineConfig(r0=0.9)
+
+
+def test_wobble_estimator_keeps_only_what_both_streams_agree_on():
+    """Reporting noise is independent between streams; a real round moves both.
+
+    The estimator must recover the shared movement and ignore the rest, because an
+    inflated shock lets an unlucky draw clear the target on one good round.
+    """
+    rng = np.random.default_rng(7)
+    n_units, n_rounds, true_cv = 200, 8, 0.09
+    unit_ids, round_ids, admin, verified = [], [], [], []
+    for u in range(n_units):
+        base = rng.uniform(0.35, 0.85)
+        for r in range(1, n_rounds + 1):
+            shared = base * rng.lognormal(-0.5 * true_cv**2, true_cv)
+            unit_ids.append(f"U{u}")
+            round_ids.append(r)
+            # Independent reporting error, three times the size of the real signal.
+            admin.append(shared * rng.lognormal(0.0, 0.27))
+            verified.append(shared * rng.lognormal(0.0, 0.27))
+
+    cv, note = estimate_reach_wobble(
+        np.array(unit_ids), np.array(round_ids), np.array(admin), np.array(verified)
+    )
+    assert abs(cv - true_cv) < 0.03, f"recovered {cv:.3f} against a true {true_cv}: {note}"
+
+    # The same movement measured from one stream alone is swamped by its own noise.
+    single, _ = estimate_reach_wobble(
+        np.array(unit_ids), np.array(round_ids), np.array(admin), np.array(admin)
+    )
+    assert single > cv * 2, "one stream cannot separate campaign movement from noise"
+
+
+def test_stickiness_is_not_dragged_down_by_movement_it_does_not_cause():
+    """Stickiness decides which children a round misses, never how many.
+
+    Movement in a settlement's own aggregate reach is therefore not evidence about
+    it, and leaving that movement in the within-unit term can only push the
+    estimate down. The correction has a known direction, so the test asserts it.
+    """
+    rng = np.random.default_rng(11)
+    n_units, n_rounds = 300, 8
+    unit_ids, round_ids, reach = [], [], []
+    for u in range(n_units):
+        base = rng.uniform(0.30, 0.90)
+        for r in range(1, n_rounds + 1):
+            unit_ids.append(f"U{u}")
+            round_ids.append(r)
+            reach.append(np.clip(base * rng.lognormal(0.0, 0.12), 0.01, 0.99))
+
+    units, rounds_, values = np.array(unit_ids), np.array(round_ids), np.array(reach)
+    uncorrected, _ = estimate_persistence_from_reach(units, rounds_, values)
+    corrected, note = estimate_persistence_from_reach(
+        units, rounds_, values, campaign_wobble_cv=0.12
+    )
+    assert corrected > uncorrected, note
+    assert corrected <= 0.98
+
+
+def test_interval_shape_is_read_off_rows_that_taught_neither_model():
+    """The spread model must not be asked to score its own training residuals.
+
+    Dividing a model's own training residuals by its own predictions understates
+    them, and every interval built from that runs narrow. The failure hides,
+    because coverage on the slice that produced it looks correct.
+    """
+    panel, _ = generate_synthetic_panel(SyntheticProgramme(settlements_per_ward=3, n_rounds=8))
+    config = EngineConfig()
+    features, _ = build_features(panel, config)
+
+    model = ReachModel()
+    report = model.fit(features, validation_rounds=2)
+
+    for name, observed in report.interval_coverage.items():
+        nominal = float(name.rstrip("%")) / 100.0
+        assert abs(observed - nominal) < 0.12, (
+            f"the {name} interval covered {observed:.0%} on rounds it had never seen"
+        )
