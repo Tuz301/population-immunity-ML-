@@ -108,6 +108,8 @@ def simulate_rounds(
     n_cells: int = 48,
     reach_drift_per_round: float = 0.0,
     drift_floor: float = 0.6,
+    reach_wobble_cv: float = 0.0,
+    rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Run every draw forward and record when each first clears the target.
 
@@ -135,6 +137,14 @@ def simulate_rounds(
         drift_floor: Lower bound on the cumulative drift factor. Fatigue plateaus;
             it does not compound to zero, and letting it do so would manufacture
             infeasibility.
+        reach_wobble_cv: Round-to-round movement in a settlement's own reach, as a
+            share of its level. Applied as a mean-preserving lognormal shock drawn
+            afresh each round, so it widens the round count without shifting it.
+            Zero reproduces the earlier behaviour, in which every round performed
+            exactly as well as the last and a draw therefore either cleared the
+            target quickly or never cleared it at all.
+        rng: Generator for the round shock. Required when ``reach_wobble_cv`` is
+            positive, and passed in rather than created so runs stay reproducible.
 
     Returns:
         A pair ``(rounds_needed, immunity_after)``. ``rounds_needed`` holds the
@@ -146,6 +156,10 @@ def simulate_rounds(
         raise ValueError("max_rounds must be at least 1.")
     if interval_months <= 0:
         raise ValueError("interval_months must be positive.")
+    if reach_wobble_cv < 0.0:
+        raise ValueError("reach_wobble_cv cannot be negative.")
+    if reach_wobble_cv > 0.0 and rng is None:
+        raise ValueError("A generator is required when reach wobble is switched on.")
 
     nodes, weights = build_reach_grid(mu, kappa, pi_zero, n_cells=n_cells)
     n = nodes.shape[0]
@@ -163,6 +177,10 @@ def simulate_rounds(
     susceptible_inflow = (births * (1.0 - ri_protection) * inflow)[:, None] * weights
     total_inflow = births * inflow
 
+    # Lognormal keeps the shock positive and right-skewed, and the offset holds
+    # its mean at one so the wobble adds spread without quietly adding reach.
+    sigma_wobble = float(np.sqrt(np.log1p(reach_wobble_cv**2))) if reach_wobble_cv > 0.0 else 0.0
+
     rounds_needed = np.full(n, np.inf)
     immunity_after = np.empty((n, max_rounds + 1))
     immunity_after[:, 0] = np.clip(1.0 - susceptible.sum(axis=1) / total, 0.0, 1.0)
@@ -170,7 +188,15 @@ def simulate_rounds(
     for r in range(1, max_rounds + 1):
         # Reach drifts with each successive round, then plateaus at the floor.
         drift = max((1.0 + reach_drift_per_round) ** (r - 1), drift_floor)
-        survival = 1.0 - take_col * drift * nodes
+        if sigma_wobble > 0.0:
+            shock = rng.lognormal(-0.5 * sigma_wobble**2, sigma_wobble, size=(n, 1))
+            effort = drift * shock
+        else:
+            effort = drift
+        # A shock can push effort above one, which no round can deliver, so the
+        # survival share is clipped rather than the shock, keeping the mean intact
+        # everywhere the bound does not bite.
+        survival = np.clip(1.0 - take_col * effort * nodes, 0.0, 1.0)
 
         total = total * decay + total_inflow
         susceptible = susceptible * decay + susceptible_inflow

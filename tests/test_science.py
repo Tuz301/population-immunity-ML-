@@ -18,6 +18,8 @@ from immunity_engine.heterogeneity import (
     beta_shapes,
     estimate_concentration,
     estimate_persistence_from_reach,
+    estimate_reach_wobble,
+    separate_persistent_reach_spread,
     unreachable_core,
 )
 from immunity_engine.immunity import (
@@ -27,6 +29,9 @@ from immunity_engine.immunity import (
     project_trajectory,
     steady_state_immunity,
 )
+from immunity_engine.adapters.synthetic import SyntheticProgramme, generate_synthetic_panel
+from immunity_engine.features import build_features
+from immunity_engine.reach_model import ReachModel
 from immunity_engine.vectorised import build_reach_grid, simulate_rounds
 
 
@@ -290,3 +295,187 @@ def test_a_reproduction_number_below_one_is_refused():
     """Below R0 = 1 there is no herd-immunity threshold, so there is no target."""
     with pytest.raises(ValueError, match="r0 must exceed 1"):
         EngineConfig(r0=0.9)
+
+
+def test_wobble_estimator_keeps_only_what_both_streams_agree_on():
+    """Reporting noise is independent between streams; a real round moves both.
+
+    The estimator must recover the shared movement and ignore the rest, because an
+    inflated shock lets an unlucky draw clear the target on one good round.
+    """
+    rng = np.random.default_rng(7)
+    n_units, n_rounds, true_cv = 200, 8, 0.09
+    unit_ids, round_ids, admin, verified = [], [], [], []
+    for u in range(n_units):
+        base = rng.uniform(0.35, 0.85)
+        for r in range(1, n_rounds + 1):
+            shared = base * rng.lognormal(-0.5 * true_cv**2, true_cv)
+            unit_ids.append(f"U{u}")
+            round_ids.append(r)
+            # Independent reporting error, three times the size of the real signal.
+            admin.append(shared * rng.lognormal(0.0, 0.27))
+            verified.append(shared * rng.lognormal(0.0, 0.27))
+
+    cv, note = estimate_reach_wobble(
+        np.array(unit_ids), np.array(round_ids), np.array(admin), np.array(verified)
+    )
+    assert abs(cv - true_cv) < 0.03, f"recovered {cv:.3f} against a true {true_cv}: {note}"
+
+    # The same movement measured from one stream alone is swamped by its own noise.
+    single, _ = estimate_reach_wobble(
+        np.array(unit_ids), np.array(round_ids), np.array(admin), np.array(admin)
+    )
+    assert single > cv * 2, "one stream cannot separate campaign movement from noise"
+
+
+def test_stickiness_is_not_dragged_down_by_movement_it_does_not_cause():
+    """Stickiness decides which children a round misses, never how many.
+
+    Movement in a settlement's own aggregate reach is therefore not evidence about
+    it, and leaving that movement in the within-unit term can only push the
+    estimate down. The correction has a known direction, so the test asserts it.
+    """
+    rng = np.random.default_rng(11)
+    n_units, n_rounds = 300, 8
+    unit_ids, round_ids, reach = [], [], []
+    for u in range(n_units):
+        base = rng.uniform(0.30, 0.90)
+        for r in range(1, n_rounds + 1):
+            unit_ids.append(f"U{u}")
+            round_ids.append(r)
+            reach.append(np.clip(base * rng.lognormal(0.0, 0.12), 0.01, 0.99))
+
+    units, rounds_, values = np.array(unit_ids), np.array(round_ids), np.array(reach)
+    uncorrected, _ = estimate_persistence_from_reach(units, rounds_, values)
+    corrected, note = estimate_persistence_from_reach(
+        units, rounds_, values, campaign_wobble_cv=0.12
+    )
+    assert corrected > uncorrected, note
+    assert corrected <= 0.98
+
+
+def test_interval_shape_is_read_off_rows_that_taught_neither_model():
+    """The spread model must not be asked to score its own training residuals.
+
+    Dividing a model's own training residuals by its own predictions understates
+    them, and every interval built from that runs narrow. The failure hides,
+    because coverage on the slice that produced it looks correct.
+    """
+    panel, _ = generate_synthetic_panel(SyntheticProgramme(settlements_per_ward=3, n_rounds=8))
+    config = EngineConfig()
+    features, _ = build_features(panel, config)
+
+    model = ReachModel()
+    report = model.fit(features, validation_rounds=2)
+
+    for name, observed in report.interval_coverage.items():
+        nominal = float(name.rstrip("%")) / 100.0
+        assert abs(observed - nominal) < 0.12, (
+            f"the {name} interval covered {observed:.0%} on rounds it had never seen"
+        )
+
+
+def test_round_movement_is_taken_back_out_of_the_persistent_reach_spread():
+    """The model states a single round; the inversion holds a level.
+
+    A settlement's predicted reach spread holds both how little is known about the
+    place and how much any one round moves. The inversion draws the level once and
+    applies the movement separately, so handing it the single-round spread counts
+    the movement twice and widens every round count.
+    """
+    rng = np.random.default_rng(5)
+    level_sd, wobble_cv, centre = 0.06, 0.08, 0.60
+    wobble_sd = wobble_cv * centre
+    single_round = centre + rng.normal(0.0, math.hypot(level_sd, wobble_sd), size=(1, 40000))
+
+    narrowed, note = separate_persistent_reach_spread(single_round, wobble_cv)
+
+    assert narrowed.std() < single_round.std(), note
+    assert abs(narrowed.std() - level_sd) < 0.006, (
+        f"level spread came back {narrowed.std():.4f} against a true {level_sd}: {note}"
+    )
+    # The centre is what the model forecast, and narrowing must not move it.
+    assert abs(float(np.median(narrowed)) - float(np.median(single_round))) < 1e-9
+
+    # With no movement estimated there is nothing to take out.
+    untouched, _ = separate_persistent_reach_spread(single_round, 0.0)
+    assert np.allclose(untouched, single_round)
+
+
+def test_the_spread_of_a_level_is_never_taken_all_the_way_to_zero():
+    """The movement is one figure for the programme; the spread is per unit.
+
+    Where the two would cancel, the honest reading is that the level is well
+    known, not that it is certain. A level asserted without error would hand back
+    the same defect from the other side.
+    """
+    confident = np.full((1, 2000), 0.70) + np.random.default_rng(3).normal(0, 0.005, (1, 2000))
+    narrowed, note = separate_persistent_reach_spread(confident, 0.25)
+    assert narrowed.std() > 0.0, note
+    assert "floor" in note
+
+
+def test_the_uncertainty_on_current_immunity_answers_to_its_inputs():
+    """A flat uncertainty cannot follow an error that is not flat.
+
+    Immunity is rebuilt from the rounds already run, so what is not known about
+    it comes from what is not known about those inputs. Near the ceiling a shift
+    in reach barely moves it; far from the ceiling every input does. An estimator
+    that returns the same figure for both is over-confident where the decision is
+    hardest and over-cautious where it is easiest.
+    """
+    from immunity_engine.contracts import ProvenanceLog
+    from immunity_engine.pipeline import estimate_current_immunity, estimate_unit_parameters
+
+    panel, _ = generate_synthetic_panel(SyntheticProgramme(seed=19))
+    config = EngineConfig()
+    log = ProvenanceLog()
+    features, log = build_features(panel, config, log)
+    parameters, _ = estimate_unit_parameters(features, panel, config, log)
+    frame = estimate_current_immunity(features, parameters, panel, config)
+
+    spread = frame["current_immunity_sd"].to_numpy()
+    assert np.all(np.isfinite(spread)) and np.all(spread > 0.0)
+    assert spread.std() > 1e-3, "the uncertainty is still effectively one number for every unit"
+
+    # Confidence must grow as immunity approaches the ceiling, where a round can
+    # no longer move it and the reconstruction has less room to be wrong.
+    level = frame["current_immunity"].to_numpy()
+    usable = np.isfinite(level) & np.isfinite(spread)
+    assert np.corrcoef(level[usable], spread[usable])[0, 1] < 0.0, (
+        "the engine is not more certain about settlements sitting near the ceiling"
+    )
+
+
+def test_an_infeasible_verdict_never_prints_a_ceiling_that_reaches_the_target():
+    """The verdict and the ceiling shown beside it must agree at the boundary.
+
+    The verdict fires when at least half the draws put the ceiling below the
+    target. Reporting the midpoint of the two middle draws breaks that agreement
+    exactly at half, where the two straddle the target: the engine then says no
+    number of rounds will reach it while printing a ceiling that does, and the
+    sentence a programme manager reads contradicts itself.
+
+    Constructed rather than simulated, because a run only lands on the boundary
+    by luck and the invariant has to hold every time.
+    """
+    from immunity_engine.rounds_required import _lower_median
+
+    target = 0.95
+    # Exactly half the draws below the target, and the half above sitting further
+    # from it than the half below. This is the case that inverts the report.
+    ceilings = np.array([0.949, 0.949, 0.990, 0.990])
+    assert float(np.mean(ceilings < target)) >= 0.50, "the verdict must fire here"
+    assert np.median(ceilings) > target, "averaging the middle pair is what breaks it"
+    assert _lower_median(ceilings) < target
+
+    # The agreement must hold for any draw count and any arrangement.
+    rng = np.random.default_rng(31)
+    for _ in range(400):
+        size = int(rng.integers(2, 400))
+        sample = rng.uniform(0.80, 0.999, size=size)
+        if float(np.mean(sample < target)) >= 0.50:
+            assert _lower_median(sample) < target, (
+                f"{size} draws put the ceiling below target at least half the time, "
+                f"yet the reported ceiling was {_lower_median(sample):.4f}"
+            )

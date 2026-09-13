@@ -268,7 +268,7 @@ def backtest_on_panel(
     panel: pd.DataFrame,
     config: EngineConfig | None = None,
     *,
-    holdout_rounds: int = 3,
+    holdout_rounds: int = 2,
     planning_interval_months: float = 3.0,
 ) -> pd.DataFrame:
     """Refit on early rounds, then check the forecast against what happened next.
@@ -294,15 +294,17 @@ def backtest_on_panel(
     """
     config = config or EngineConfig()
     rounds = np.sort(panel["round_index"].unique())
-    # The reach model splits the history it is given into a fitting slice and a
-    # calibration slice of matching depth, so the history has to be at least four
-    # rounds deep before any of it can be held out.
-    minimum = holdout_rounds + 4
+    # The reach model cuts the history it is given three ways: rounds that fit the
+    # centre, rounds that teach the spread, and rounds that say what the spread is
+    # worth out of sample. Six rounds is the shallowest history that supports all
+    # three, and a backtest run on less would quote an interval built by the
+    # fallback path, which is known to run narrow.
+    minimum = holdout_rounds + 6
     if len(rounds) < minimum:
         raise ValueError(
             f"Panel has {len(rounds)} rounds; a {holdout_rounds}-round backtest needs at "
-            f"least {minimum}, because the reach model needs a fitting slice and a "
-            "calibration slice inside the history."
+            f"least {minimum}, because the reach model needs a fitting slice, a spread "
+            "slice and a shape slice inside the history."
         )
     cut = rounds[-holdout_rounds]
 
@@ -311,7 +313,7 @@ def backtest_on_panel(
         history,
         config,
         planning_interval_months=planning_interval_months,
-        validation_rounds=1,
+        validation_rounds=2,
     )
     if plan_set.reach_report is None:
         raise ValueError("Reach model was not fitted on the history, so there is nothing to score.")

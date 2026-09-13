@@ -340,6 +340,7 @@ def estimate_persistence_from_reach(
     reach: np.ndarray,
     *,
     verification_lot_size: int | None = None,
+    campaign_wobble_cv: float = 0.0,
     min_units: int = 20,
 ) -> tuple[float, str]:
     """Estimate ``rho`` from how much of the variation in reach is between places.
@@ -362,6 +363,12 @@ def estimate_persistence_from_reach(
         round_ids: Round identifier for each observation.
         reach: Observed reach for each observation.
         verification_lot_size: Sample size behind each observation.
+        campaign_wobble_cv: Round-to-round movement in a settlement's own reach,
+            from ``estimate_reach_wobble``. Removed from the within-settlement term
+            for the same reason sampling noise is: a settlement whose reach moved
+            because a team changed is not a settlement whose children reshuffled.
+            Leaving it in can only push the estimate down, so this correction has
+            a known direction.
         min_units: Fewest units the estimator will accept.
 
     Returns:
@@ -412,6 +419,15 @@ def estimate_persistence_from_reach(
         sampling_variance = grand_mean * (1.0 - grand_mean) / verification_lot_size
         ms_within = max(ms_within - sampling_variance, 1e-8)
 
+    # Stickiness is a statement about which children a round misses. It has no
+    # effect at all on how many a settlement reaches, so movement in the
+    # settlement's own aggregate reach is not evidence about it. Left in the
+    # within term it reads as children reshuffling and drags the estimate down.
+    wobble_variance = 0.0
+    if campaign_wobble_cv > 0.0:
+        wobble_variance = (campaign_wobble_cv * grand_mean) ** 2
+        ms_within = max(ms_within - wobble_variance, 1e-8)
+
     # Effective group size for unbalanced designs.
     n_effective = (len(centred) - float(np.sum(counts**2)) / len(centred)) / df_between
     n_effective = max(n_effective, 1.0 + 1e-6)
@@ -428,9 +444,198 @@ def estimate_persistence_from_reach(
         else ", with verification sampling noise still counted as within-unit variation, "
              "which biases this estimate downward"
     )
+    if wobble_variance > 0.0:
+        correction += (
+            f" and the {campaign_wobble_cv:.1%} round-to-round movement in the settlement's "
+            "own reach, which stickiness does not cause"
+        )
     return rho, (
         f"rho = {rho:.2f} from the intraclass correlation of reach across "
         f"{len(units)} units and {len(rounds)} rounds{correction}."
+    )
+
+
+def estimate_reach_wobble(
+    unit_ids: np.ndarray,
+    round_ids: np.ndarray,
+    admin_reach: np.ndarray,
+    verified_reach: np.ndarray,
+    *,
+    cap: float = 0.40,
+    min_units: int = 20,
+    min_rounds_per_unit: int = 4,
+) -> tuple[float, str]:
+    """Estimate how much a settlement's own reach moves from one round to the next.
+
+    The engine needs this and does not otherwise have it. Stickiness decides which
+    children a round misses, never how many, so the simulator holds a settlement's
+    aggregate reach fixed across every round of a draw. A draw then either clears
+    the target in the first few rounds or never clears it, and the round count has
+    no middle. Real campaigns are not like that: a team changes, a road closes, a
+    market day falls badly, and the same settlement returns a different number.
+
+    Measuring it is the hard part, because the obvious estimator is wrong. The
+    round-to-round spread of a single reported series is mostly reporting noise,
+    and feeding that spread to the simulator makes the engine worse, not better:
+    an inflated shock lets an unlucky draw clear the target on one good round, and
+    a first crossing is recorded whether or not it would have held.
+
+    The panel carries two streams of the same underlying round, and their errors
+    are independent - one is what teams tallied, the other is what verification
+    found. Their covariance within a settlement therefore keeps what the two
+    streams agree on, which is the round itself, and drops what only one of them
+    saw, which is noise. In logs, that covariance is the squared coefficient of
+    variation directly.
+
+    The median across settlements is taken rather than the mean. Accessibility
+    moves between rounds, and a settlement that closes and reopens produces a
+    covariance orders of magnitude above the rest. That movement is real, but it
+    belongs to the unreachable core and to the reach model, not to the ordinary
+    round-to-round wobble this parameter carries, and a mean would let a handful
+    of such settlements set the figure for every unit in the programme.
+
+    Args:
+        unit_ids: Unit identifier for each observation.
+        round_ids: Round identifier for each observation.
+        admin_reach: Administrative coverage for each observation.
+        verified_reach: Verified coverage for each observation.
+        cap: Upper bound on the returned coefficient of variation.
+        min_units: Fewest units with enough rounds that the estimator will accept.
+        min_rounds_per_unit: Rounds a unit needs before it contributes. Four is the
+            floor at which a within-unit covariance means anything.
+
+    Returns:
+        A pair ``(coefficient_of_variation, note)``.
+    """
+    unit_ids = np.asarray(unit_ids)
+    round_ids = np.asarray(round_ids)
+    admin = np.asarray(admin_reach, dtype=float)
+    verified = np.asarray(verified_reach, dtype=float)
+
+    fallback = (
+        0.0,
+        "Round-to-round reach movement not estimated, so reach is held steady between "
+        "rounds. The round count will have a thinner middle than the field does.",
+    )
+
+    keep = np.isfinite(admin) & np.isfinite(verified) & (admin > 0.01) & (verified > 0.01)
+    if keep.sum() < min_units * min_rounds_per_unit:
+        return fallback
+    unit_ids, round_ids = unit_ids[keep], round_ids[keep]
+    log_admin, log_verified = np.log(admin[keep]), np.log(verified[keep])
+
+    # A nationally good or bad round is a shared shock, not a settlement's own
+    # movement, so it is removed from each stream before anything else.
+    _, round_index = np.unique(round_ids, return_inverse=True)
+    for series in (log_admin, log_verified):
+        round_mean = np.bincount(round_index, weights=series) / np.bincount(round_index)
+        series -= round_mean[round_index]
+
+    units, unit_index = np.unique(unit_ids, return_inverse=True)
+    counts = np.bincount(unit_index)
+    unit_admin = np.bincount(unit_index, weights=log_admin) / counts
+    unit_verified = np.bincount(unit_index, weights=log_verified) / counts
+    product = (log_admin - unit_admin[unit_index]) * (log_verified - unit_verified[unit_index])
+
+    covariance = np.bincount(unit_index, weights=product) / np.maximum(counts - 1, 1)
+    usable = counts >= min_rounds_per_unit
+    if usable.sum() < min_units:
+        return fallback
+
+    shared = float(np.median(covariance[usable]))
+    if shared <= 0.0:
+        return (
+            0.0,
+            f"The two reporting streams share no round-to-round movement across "
+            f"{int(usable.sum())} settlements, so reach is held steady between rounds. "
+            "Either campaigns are unusually uniform here or one stream is not measuring "
+            "the round at all.",
+        )
+
+    cv = float(np.clip(np.sqrt(shared), 0.0, cap))
+    capped = " (capped)" if cv >= cap else ""
+    return cv, (
+        f"Reach moves {cv:.1%} of its own level between rounds within a settlement{capped}, "
+        f"from the movement the administrative and verified streams agree on across "
+        f"{int(usable.sum())} settlements. Taken as the median so that settlements which "
+        "close and reopen do not set the figure for everywhere else."
+    )
+
+
+def separate_persistent_reach_spread(
+    draws: np.ndarray,
+    wobble_cv: float,
+    *,
+    variance_floor: float = 0.10,
+) -> tuple[np.ndarray, str]:
+    """Take the round-to-round movement back out of the predictive reach spread.
+
+    The reach model is trained on the reach of a single round, so what it
+    predicts, and what its interval covers, is what the next round will return.
+    That spread holds two different things at once: how little is known about the
+    settlement's own level, which persists for as long as the plan runs, and how
+    much any one round moves around that level, which does not.
+
+    The inversion needs them apart. It draws one reach per replicate, holds it
+    across every round of that draw because the settlement's level is a property
+    of the place, and then applies the round-to-round shock separately. Handing it
+    the single-round spread therefore counts the movement twice: once inside the
+    level that never changes, and again in the shock. The round-count
+    distribution comes out too wide, and a distribution that is too wide is not
+    merely cautious. It shrinks every stated probability toward the middle, so a
+    settlement that will certainly not get there is given a chance it does not
+    have, and one that certainly will is denied the confidence it has earned.
+
+    The variances add, because a round's movement is independent of what is not
+    known about the level, so the level's own variance is the difference between
+    them. Draws are scaled about their median by the square root of the share
+    that remains, which narrows the spread while keeping the centre and the
+    skew that a bounded quantity has.
+
+    The subtraction is floored rather than allowed to vanish. The wobble is one
+    figure for the whole programme, while the predictive spread is conditional
+    and can be narrow wherever the model is confident, so for some units the
+    subtraction would take everything. Nothing about a campaign is known that
+    exactly, and treating a level as certain would hand back the opposite error.
+
+    Args:
+        draws: Predictive reach draws, shape ``(n_units, n_draws)``.
+        wobble_cv: Round-to-round movement in a settlement's reach, as a share of
+            its level. Zero leaves the draws untouched.
+        variance_floor: Least share of the predictive variance kept as the
+            settlement's own level.
+
+    Returns:
+        A pair ``(draws, note)``.
+    """
+    draws = np.atleast_2d(np.asarray(draws, dtype=float))
+    if wobble_cv <= 0.0:
+        return draws, (
+            "Reach draws carry the single-round spread unchanged, because no "
+            "round-to-round movement was estimated to take out of it."
+        )
+    if not 0.0 < variance_floor <= 1.0:
+        raise ValueError(f"variance_floor must lie in (0, 1], got {variance_floor}.")
+
+    centre = np.median(draws, axis=1, keepdims=True)
+    predictive_variance = draws.var(axis=1, keepdims=True)
+    wobble_variance = (wobble_cv * centre) ** 2
+
+    share = np.ones_like(predictive_variance)
+    measurable = predictive_variance > 1e-12
+    share[measurable] = 1.0 - wobble_variance[measurable] / predictive_variance[measurable]
+    floored = share < variance_floor
+    share = np.maximum(share, variance_floor)
+
+    narrowed = centre + (draws - centre) * np.sqrt(share)
+    at_floor = float(floored.mean())
+    return np.clip(narrowed, 0.0, 1.0), (
+        f"Round-to-round movement of {wobble_cv:.1%} taken back out of the reach "
+        f"draws, which the model states for a single round and the inversion holds "
+        f"across every round of a draw. The settlement's own spread narrows to "
+        f"{float(np.median(np.sqrt(share))):.0%} of the single-round spread at the "
+        f"median unit; {at_floor:.0%} of units sit at the floor, where the movement "
+        "would otherwise account for the whole of it."
     )
 
 
