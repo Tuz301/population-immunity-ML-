@@ -38,6 +38,7 @@ from .heterogeneity import (
     estimate_persistence,
     estimate_persistence_from_reach,
     estimate_reach_wobble,
+    separate_persistent_reach_spread,
     unreachable_core,
 )
 from .reach_model import ReachModel, ReachModelReport
@@ -436,6 +437,18 @@ def estimate_current_immunity(
     immunity = np.empty(len(parameters))
     immunity_sd = np.empty(len(parameters))
 
+    # One set of standard normal draws, shared by every unit, so that two units
+    # with the same inputs are given the same uncertainty and a rerun of the
+    # pipeline reproduces it.
+    uncertainty_draws = 32
+    rng = np.random.default_rng(config.random_seed)
+    draw_normal = rng.standard_normal((uncertainty_draws, 4))
+    lqas_error = float(np.sqrt(0.25 / config.default_lqas_lot_size))
+    inflation_sigma = float(np.sqrt(np.log1p(config.denominator_inflation_sd**2)))
+    inflation_factor = np.exp(
+        -0.5 * inflation_sigma**2 + inflation_sigma * rng.standard_normal(uncertainty_draws)
+    )
+
     for i, unit in enumerate(parameters.index):
         history = [r for r in (reach_history.iloc[i] or []) if np.isfinite(r)]
         pi0 = float(parameters["pi_zero"].iloc[i])
@@ -449,28 +462,59 @@ def estimate_current_immunity(
             immunity[i], immunity_sd[i] = baseline, 0.12
             continue
 
-        # Three replays: the reach as measured, and plus or minus the sampling
-        # error of a small verification lot. The spread becomes the uncertainty.
-        results = []
-        for shift in (-1.0, 0.0, 1.0):
-            noise = shift * np.sqrt(0.25 / config.default_lqas_lot_size)
-            results.append(
-                _replay(
-                    history=np.clip(np.array(history) + noise, 0.0, 1.0),
-                    pi_zero=pi0,
-                    kappa=float(parameters["kappa"].iloc[i]),
-                    rho=float(parameters["rho"].iloc[i]),
-                    take=config.per_dose_take_mean,
-                    baseline_immunity=baseline,
-                    cohort=cohort,
-                    births=float(births.iloc[i]) / float(parameters["denominator_inflation"].iloc[i]),
-                    ri_protection=baseline,
-                    interval_months=float(spacing.iloc[i]),
-                    age_band_months=config.target_age_months,
-                )
+        measured = np.asarray(history, dtype=float)
+        inflation = float(parameters["denominator_inflation"].iloc[i])
+        kappa_i = float(parameters["kappa"].iloc[i])
+        rho_i = float(parameters["rho"].iloc[i])
+        birth_rate = float(births.iloc[i])
+        replay_kwargs = dict(
+            baseline_immunity=baseline,
+            ri_protection=baseline,
+            interval_months=float(spacing.iloc[i]),
+            age_band_months=config.target_age_months,
+        )
+
+        immunity[i] = _replay(
+            history=measured,
+            pi_zero=pi0,
+            kappa=kappa_i,
+            rho=rho_i,
+            take=config.per_dose_take_mean,
+            cohort=cohort,
+            births=birth_rate / inflation,
+            **replay_kwargs,
+        )
+
+        # The replay is rebuilt under every input it depends on, not under the
+        # verification lot alone, because near the ceiling a shift in reach moves
+        # immunity hardly at all while a wrong denominator or a wrong core moves
+        # it a long way, and the places furthest from the ceiling are exactly the
+        # places where the other inputs are worst known. The dispersions are the
+        # ones the inversion already states for these same quantities, so the
+        # engine holds one set of beliefs rather than two.
+        replays = np.empty(uncertainty_draws)
+        for d in range(uncertainty_draws):
+            # One shift for the whole history: a verification lot that reads high
+            # in one round reads high in the next, so this is a bias in the
+            # series, not noise around it.
+            shifted = np.clip(measured + draw_normal[d, 0] * lqas_error, 0.0, 1.0)
+            pi_d = float(np.clip(pi0 + draw_normal[d, 1] * (0.30 * pi0 + 0.005), 0.0, 0.60))
+            rho_d = float(np.clip(rho_i + draw_normal[d, 2] * 0.10, 0.0, 0.98))
+            take_d = float(np.clip(
+                config.per_dose_take_mean + draw_normal[d, 3] * config.per_dose_take_sd, 0.05, 1.0
+            ))
+            inflation_d = float(np.clip(inflation * inflation_factor[d], 0.5, 3.0))
+            replays[d] = _replay(
+                history=shifted,
+                pi_zero=pi_d,
+                kappa=kappa_i,
+                rho=rho_d,
+                take=take_d,
+                cohort=max(float(parameters["target_pop"].iloc[i]) / inflation_d, 1.0),
+                births=birth_rate / inflation_d,
+                **replay_kwargs,
             )
-        immunity[i] = results[1]
-        immunity_sd[i] = max((results[2] - results[0]) / 2.0, 0.02)
+        immunity_sd[i] = float(np.clip(replays.std(ddof=1), 0.005, 0.25))
 
     return pd.DataFrame(
         {
@@ -594,6 +638,15 @@ def run_pipeline(
             spread = float(values.std()) if values.size > 1 else 0.15
             draws[i] = np.clip(rng.normal(centre, max(spread, 0.08), reach_draws_per_unit), 0.0, 1.0)
 
+    # The draws above state what a single round will return, so they already hold
+    # the round-to-round movement that the simulator applies again as a shock.
+    # Taking it back out here leaves each draw as the settlement's own level,
+    # which is what the inversion holds fixed across the rounds of a draw.
+    unit_wobble = parameters["reach_wobble_cv"].to_numpy(dtype=float)
+    programme_wobble = float(np.median(unit_wobble)) if unit_wobble.size else 0.0
+    draws, spread_note = separate_persistent_reach_spread(draws, programme_wobble)
+    notes.append(spread_note)
+
     plans: list[UnitPlan] = []
     for i, unit in enumerate(parameters.index):
         row = parameters.loc[unit]
@@ -614,6 +667,7 @@ def run_pipeline(
             ri_protection=float(row["ri_protection"]),
             interval_months=planning_interval_months,
             denominator_inflation_mean=float(row["denominator_inflation"]),
+            denominator_inflation_sd=config.denominator_inflation_sd,
             reach_drift_per_round=float(row["reach_drift_per_round"]),
             reach_wobble_cv=float(row["reach_wobble_cv"]),
         )

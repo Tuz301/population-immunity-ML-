@@ -83,7 +83,7 @@ Neither refusal is reachable from a unit test of the maths — both only appear
 when a real panel goes through the real model. This is why CI has a separate
 end-to-end job.
 
-**Five estimator biases were found during validation.** All are fixed; all are
+**Seven estimator biases were found during validation.** All are fixed; all are
 documented in `docs/METHOD.md` §8. Do not reintroduce them:
 
 - Stickiness (`rho`) from a pass-or-fail label reads far too low (0.38 against a
@@ -107,6 +107,22 @@ documented in `docs/METHOD.md` §8. Do not reintroduce them:
   whose errors are independent, and take the median across settlements so that
   places which close and reopen do not set the figure for everywhere else. That
   reads 8.4%.
+- The predicted reach spread must have that same round-to-round movement taken
+  back out before the inversion holds it as a level. The model states what one
+  round will return; the inversion draws a level once, keeps it for every round
+  of a draw, and applies the movement separately. Hand it the single-round spread
+  and the movement is counted twice. At the median settlement **53% of the reach
+  predictive variance is movement**, so the level's own spread was half again too
+  wide.
+- The uncertainty on reconstructed current immunity must be propagated, not
+  asserted. It was a flat 0.02 for every settlement, produced by perturbing the
+  reach history alone by one verification lot's sampling error and then flooring
+  the result — and the floor was doing all the work. The true error is strongly
+  heteroscedastic: near the ceiling a shift in reach barely moves immunity, while
+  far from it every input does. Measured against truth the stated figure was
+  **2.4x too cautious at the top of the range**. Rebuild the replay under every
+  input it depends on, at the dispersions the inversion already states for those
+  same quantities.
 
 **Never let the spread model score its own training residuals.** The interval
 width is the shape of the standardised residual. Fitting the scale model on a
@@ -116,6 +132,25 @@ a nominal 80%. The failure does not show up where it is made: coverage on the
 slice that produced it looks correct. The calibration slice is therefore split
 again by round, so the shape is read off rows that taught neither model. That
 holds all three reported levels within tolerance.
+
+**The mid-range probability gap is a point-estimate defect, not a calibration
+defect.** The engine states 55% where 40% happens, through the middle of its
+range. Six hypotheses about the spread were implemented and measured; five were
+rejected and the sixth, the conformal self-scoring leak, was real but moved the
+middle not at all. The question was settled by handing the engine the true
+current immunity and changing nothing else: round-count MAE fell 1.37 to 0.78,
+and the gap at 0.45, 0.55 and 0.65 went to -0.01, +0.00 and +0.02. The middle is
+mis-stated because immunity is reconstructed with error, not because the
+probability is built wrongly from it. **Do not attempt to close this gap by
+re-tuning the Monte Carlo.** It closes by measuring immunity — a serosurvey or
+LQAS that anchors the starting stock — which is also what the engine's own
+`binding_constraint` names for these units.
+
+**Scores move about 0.02 of Brier between synthetic seeds.** Measured across
+seeds 11, 23 and 37: 0.0933, 0.0883, 0.1081, an sd of 0.010 and a range of 0.020.
+Any claimed improvement or regression smaller than that is noise. Interval
+coverage is far steadier, at 88.4% +/- 1.4, so it is the better signal to steer
+a calibration change by.
 
 **The calibration slice must match the deployment horizon.** A residual measured
 one round ahead is smaller than one measured three rounds ahead. Calibrating at

@@ -19,6 +19,7 @@ from immunity_engine.heterogeneity import (
     estimate_concentration,
     estimate_persistence_from_reach,
     estimate_reach_wobble,
+    separate_persistent_reach_spread,
     unreachable_core,
 )
 from immunity_engine.immunity import (
@@ -372,3 +373,75 @@ def test_interval_shape_is_read_off_rows_that_taught_neither_model():
         assert abs(observed - nominal) < 0.12, (
             f"the {name} interval covered {observed:.0%} on rounds it had never seen"
         )
+
+
+def test_round_movement_is_taken_back_out_of_the_persistent_reach_spread():
+    """The model states a single round; the inversion holds a level.
+
+    A settlement's predicted reach spread holds both how little is known about the
+    place and how much any one round moves. The inversion draws the level once and
+    applies the movement separately, so handing it the single-round spread counts
+    the movement twice and widens every round count.
+    """
+    rng = np.random.default_rng(5)
+    level_sd, wobble_cv, centre = 0.06, 0.08, 0.60
+    wobble_sd = wobble_cv * centre
+    single_round = centre + rng.normal(0.0, math.hypot(level_sd, wobble_sd), size=(1, 40000))
+
+    narrowed, note = separate_persistent_reach_spread(single_round, wobble_cv)
+
+    assert narrowed.std() < single_round.std(), note
+    assert abs(narrowed.std() - level_sd) < 0.006, (
+        f"level spread came back {narrowed.std():.4f} against a true {level_sd}: {note}"
+    )
+    # The centre is what the model forecast, and narrowing must not move it.
+    assert abs(float(np.median(narrowed)) - float(np.median(single_round))) < 1e-9
+
+    # With no movement estimated there is nothing to take out.
+    untouched, _ = separate_persistent_reach_spread(single_round, 0.0)
+    assert np.allclose(untouched, single_round)
+
+
+def test_the_spread_of_a_level_is_never_taken_all_the_way_to_zero():
+    """The movement is one figure for the programme; the spread is per unit.
+
+    Where the two would cancel, the honest reading is that the level is well
+    known, not that it is certain. A level asserted without error would hand back
+    the same defect from the other side.
+    """
+    confident = np.full((1, 2000), 0.70) + np.random.default_rng(3).normal(0, 0.005, (1, 2000))
+    narrowed, note = separate_persistent_reach_spread(confident, 0.25)
+    assert narrowed.std() > 0.0, note
+    assert "floor" in note
+
+
+def test_the_uncertainty_on_current_immunity_answers_to_its_inputs():
+    """A flat uncertainty cannot follow an error that is not flat.
+
+    Immunity is rebuilt from the rounds already run, so what is not known about
+    it comes from what is not known about those inputs. Near the ceiling a shift
+    in reach barely moves it; far from the ceiling every input does. An estimator
+    that returns the same figure for both is over-confident where the decision is
+    hardest and over-cautious where it is easiest.
+    """
+    from immunity_engine.contracts import ProvenanceLog
+    from immunity_engine.pipeline import estimate_current_immunity, estimate_unit_parameters
+
+    panel, _ = generate_synthetic_panel(SyntheticProgramme(seed=19))
+    config = EngineConfig()
+    log = ProvenanceLog()
+    features, log = build_features(panel, config, log)
+    parameters, _ = estimate_unit_parameters(features, panel, config, log)
+    frame = estimate_current_immunity(features, parameters, panel, config)
+
+    spread = frame["current_immunity_sd"].to_numpy()
+    assert np.all(np.isfinite(spread)) and np.all(spread > 0.0)
+    assert spread.std() > 1e-3, "the uncertainty is still effectively one number for every unit"
+
+    # Confidence must grow as immunity approaches the ceiling, where a round can
+    # no longer move it and the reconstruction has less room to be wrong.
+    level = frame["current_immunity"].to_numpy()
+    usable = np.isfinite(level) & np.isfinite(spread)
+    assert np.corrcoef(level[usable], spread[usable])[0, 1] < 0.0, (
+        "the engine is not more certain about settlements sitting near the ceiling"
+    )

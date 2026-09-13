@@ -305,6 +305,16 @@ class EngineConfig:
     default_lqas_lot_size: int = 60
     """Assumed LQAS sample size when verified_sample_n is absent."""
 
+    denominator_inflation_sd: float = 0.08
+    """Uncertainty on the factor by which a reported target population overstates
+    the true cohort.
+
+    Stated once and used twice: to rebuild immunity from the rounds already run,
+    and to project the rounds still needed. A denominator believed more firmly in
+    one of those than the other would make the engine confident about where a
+    settlement stands and unsure where it is going, for no reason a programme
+    could defend."""
+
     # --- Reach drift -----------------------------------------------------
     estimate_reach_drift: bool = True
     """Measure how reach changes across successive rounds and project it forward.

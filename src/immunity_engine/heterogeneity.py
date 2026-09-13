@@ -562,6 +562,83 @@ def estimate_reach_wobble(
     )
 
 
+def separate_persistent_reach_spread(
+    draws: np.ndarray,
+    wobble_cv: float,
+    *,
+    variance_floor: float = 0.10,
+) -> tuple[np.ndarray, str]:
+    """Take the round-to-round movement back out of the predictive reach spread.
+
+    The reach model is trained on the reach of a single round, so what it
+    predicts, and what its interval covers, is what the next round will return.
+    That spread holds two different things at once: how little is known about the
+    settlement's own level, which persists for as long as the plan runs, and how
+    much any one round moves around that level, which does not.
+
+    The inversion needs them apart. It draws one reach per replicate, holds it
+    across every round of that draw because the settlement's level is a property
+    of the place, and then applies the round-to-round shock separately. Handing it
+    the single-round spread therefore counts the movement twice: once inside the
+    level that never changes, and again in the shock. The round-count
+    distribution comes out too wide, and a distribution that is too wide is not
+    merely cautious. It shrinks every stated probability toward the middle, so a
+    settlement that will certainly not get there is given a chance it does not
+    have, and one that certainly will is denied the confidence it has earned.
+
+    The variances add, because a round's movement is independent of what is not
+    known about the level, so the level's own variance is the difference between
+    them. Draws are scaled about their median by the square root of the share
+    that remains, which narrows the spread while keeping the centre and the
+    skew that a bounded quantity has.
+
+    The subtraction is floored rather than allowed to vanish. The wobble is one
+    figure for the whole programme, while the predictive spread is conditional
+    and can be narrow wherever the model is confident, so for some units the
+    subtraction would take everything. Nothing about a campaign is known that
+    exactly, and treating a level as certain would hand back the opposite error.
+
+    Args:
+        draws: Predictive reach draws, shape ``(n_units, n_draws)``.
+        wobble_cv: Round-to-round movement in a settlement's reach, as a share of
+            its level. Zero leaves the draws untouched.
+        variance_floor: Least share of the predictive variance kept as the
+            settlement's own level.
+
+    Returns:
+        A pair ``(draws, note)``.
+    """
+    draws = np.atleast_2d(np.asarray(draws, dtype=float))
+    if wobble_cv <= 0.0:
+        return draws, (
+            "Reach draws carry the single-round spread unchanged, because no "
+            "round-to-round movement was estimated to take out of it."
+        )
+    if not 0.0 < variance_floor <= 1.0:
+        raise ValueError(f"variance_floor must lie in (0, 1], got {variance_floor}.")
+
+    centre = np.median(draws, axis=1, keepdims=True)
+    predictive_variance = draws.var(axis=1, keepdims=True)
+    wobble_variance = (wobble_cv * centre) ** 2
+
+    share = np.ones_like(predictive_variance)
+    measurable = predictive_variance > 1e-12
+    share[measurable] = 1.0 - wobble_variance[measurable] / predictive_variance[measurable]
+    floored = share < variance_floor
+    share = np.maximum(share, variance_floor)
+
+    narrowed = centre + (draws - centre) * np.sqrt(share)
+    at_floor = float(floored.mean())
+    return np.clip(narrowed, 0.0, 1.0), (
+        f"Round-to-round movement of {wobble_cv:.1%} taken back out of the reach "
+        f"draws, which the model states for a single round and the inversion holds "
+        f"across every round of a draw. The settlement's own spread narrows to "
+        f"{float(np.median(np.sqrt(share))):.0%} of the single-round spread at the "
+        f"median unit; {at_floor:.0%} of units sit at the floor, where the movement "
+        "would otherwise account for the whole of it."
+    )
+
+
 def unreachable_core(
     *,
     inaccessible_share: float,
