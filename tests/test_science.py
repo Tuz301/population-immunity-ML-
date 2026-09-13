@@ -445,3 +445,37 @@ def test_the_uncertainty_on_current_immunity_answers_to_its_inputs():
     assert np.corrcoef(level[usable], spread[usable])[0, 1] < 0.0, (
         "the engine is not more certain about settlements sitting near the ceiling"
     )
+
+
+def test_an_infeasible_verdict_never_prints_a_ceiling_that_reaches_the_target():
+    """The verdict and the ceiling shown beside it must agree at the boundary.
+
+    The verdict fires when at least half the draws put the ceiling below the
+    target. Reporting the midpoint of the two middle draws breaks that agreement
+    exactly at half, where the two straddle the target: the engine then says no
+    number of rounds will reach it while printing a ceiling that does, and the
+    sentence a programme manager reads contradicts itself.
+
+    Constructed rather than simulated, because a run only lands on the boundary
+    by luck and the invariant has to hold every time.
+    """
+    from immunity_engine.rounds_required import _lower_median
+
+    target = 0.95
+    # Exactly half the draws below the target, and the half above sitting further
+    # from it than the half below. This is the case that inverts the report.
+    ceilings = np.array([0.949, 0.949, 0.990, 0.990])
+    assert float(np.mean(ceilings < target)) >= 0.50, "the verdict must fire here"
+    assert np.median(ceilings) > target, "averaging the middle pair is what breaks it"
+    assert _lower_median(ceilings) < target
+
+    # The agreement must hold for any draw count and any arrangement.
+    rng = np.random.default_rng(31)
+    for _ in range(400):
+        size = int(rng.integers(2, 400))
+        sample = rng.uniform(0.80, 0.999, size=size)
+        if float(np.mean(sample < target)) >= 0.50:
+            assert _lower_median(sample) < target, (
+                f"{size} draws put the ceiling below target at least half the time, "
+                f"yet the reported ceiling was {_lower_median(sample):.4f}"
+            )

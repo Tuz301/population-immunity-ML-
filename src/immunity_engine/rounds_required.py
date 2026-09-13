@@ -385,8 +385,8 @@ def solve_unit(
         r: float(np.mean(rounds_needed <= r)) for r in range(1, config.max_rounds + 1)
     }
 
-    ceiling_median = float(np.median(ceilings))
-    core_ceiling_median = float(np.median(core_ceiling))
+    ceiling_median = _lower_median(ceilings)
+    core_ceiling_median = _lower_median(core_ceiling)
     probability_infeasible = float(np.mean(ceilings < target))
     probability_infeasible_with_drift = float(np.mean(drifted_ceiling < target))
     fatigue_risk = bool(
@@ -455,6 +455,26 @@ def solve_unit(
         interval_months=float(inputs.interval_months),
         n_draws=config.n_draws,
     )
+
+
+def _lower_median(values: np.ndarray) -> float:
+    """Median as a draw that actually happened, not the midpoint of two that did.
+
+    The infeasibility verdict fires when at least half the draws put the ceiling
+    below the target, and the ceiling reported beside it must agree. Averaging the
+    two middle draws breaks that agreement at the boundary: with exactly half
+    below, the two straddle the target and their midpoint can land above it, so
+    the engine says no number of rounds will reach the target while printing a
+    ceiling that does. A programme manager reading that sentence cannot act on it.
+
+    Taking the lower of the two removes the disagreement by construction, and it
+    is the convention ``_quantile_round`` already uses on the round count for a
+    related reason.
+    """
+    ordered = np.sort(np.asarray(values, dtype=float))
+    if ordered.size == 0:
+        return float("nan")
+    return float(ordered[max(0, int(np.ceil(0.50 * ordered.size)) - 1)])
 
 
 def _quantile_round(rounds: np.ndarray, level: float) -> int | None:

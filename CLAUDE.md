@@ -72,6 +72,17 @@ Each guards a property that a round count depends on:
 5. **A higher target never needs fewer rounds.**
 6. **Runs are reproducible.** Every figure is Monte Carlo; a seeded run must
    reproduce exactly. CI enforces this.
+7. **A verdict and the figure printed beside it must agree.** The infeasibility
+   verdict fires when at least half the draws put the ceiling below the target,
+   so the ceiling reported alongside it has to be below the target too. Summaries
+   that interpolate between draws break this exactly at the boundary: with half
+   the draws below, the two middle ones straddle the target and their midpoint
+   can land above it, so the engine says no number of rounds will reach the
+   target while printing a ceiling that does. Report medians of draw arrays as a
+   draw that happened, through `_lower_median`, not as a midpoint of two that
+   did. This reached CI as a test that passed locally and failed on the runner,
+   because a unit has to land on P = 0.500 exactly for it to show — which two of
+   twelve seed and draw-count combinations do.
 
 ## Gotchas that cost real time
 
