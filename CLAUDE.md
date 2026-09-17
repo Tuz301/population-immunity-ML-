@@ -17,7 +17,7 @@ wrong instrument is the output that changes what a programme does.
 
 ```bash
 pip install -e ".[dev]"          # install, with test deps
-python -m pytest -q              # 46 tests, ~20s
+python -m pytest -q              # 53 tests, ~40s
 python -m immunity_engine plan       --draws 2000    # round requirement per unit
 python -m immunity_engine allocate   --budget 40     # spread a round budget
 python -m immunity_engine council    --limit 5       # expert review
