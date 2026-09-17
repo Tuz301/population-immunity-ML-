@@ -59,18 +59,18 @@ rounds, and verified counts carry finite-sample noise.
 
 | Measure | Result |
 |---|---|
-| Round count, mean absolute error | 1.42 rounds |
+| Round count, mean absolute error | 1.37 rounds |
 | Round count, median absolute error | 1 round |
-| Predicted within one round | 65% |
-| Round count, rank correlation with truth | 0.61 |
+| Predicted within one round | 66% |
+| Round count, rank correlation with truth | 0.63 |
 | Reconstructed current immunity, mean absolute error | 0.032 |
-| Unreachable verdict, recall | 94% |
-| Unreachable verdict, precision | 81% |
-| Round-sufficiency Brier score | 0.106 (0.25 is uninformative) |
-| 80% round-count interval, observed coverage | 93% (target 80%) |
+| Unreachable verdict, recall | 95% |
+| Unreachable verdict, precision | 80% |
+| Round-sufficiency Brier score | 0.109 (0.25 is uninformative) |
+| 80% round-count interval, observed coverage | 88% (target 80%) |
 | Reach forecast, out-of-sample error | 0.066 reach points |
 | Reach forecast, skill over persistence | +51% |
-| Reach forecast, 80% interval coverage | 71% (target 80%) |
+| Reach forecast, 80% interval coverage | 82% (target 80%) |
 
 Read these numbers as a claim about the estimator, not about Nigeria. They show
 that the engine recovers a known answer under known misspecification. Field
@@ -78,17 +78,21 @@ accuracy needs the field panel.
 
 Three results are stated rather than tuned away.
 
-The 80% round-count interval covers the truth 93% of the time, so the engine
-under-claims what it knows there. Tuning that against the validation truth would
+The 80% round-count interval covers the truth 88% of the time, so the engine
+still under-claims what it knows. Tuning that against the validation truth would
 be fitting to the test.
 
-The reach model's own 80% interval covers only 71% of held-out observations, so
-it claims more than it knows. The engine prints this as a calibration verdict and
-the council raises it as a finding on every recommendation. Read the round count
-as a range, not as a confidence statement, until that verdict passes.
+The reach calibration verdict now reads *calibrated within tolerance*, so the
+round-count intervals derived from it may be read as stated rather than as
+indicative. All three reported reach levels — 90%, 80% and 50% — cover within
+tolerance on rounds the model has never seen.
 
-The mid-range round-sufficiency probabilities remain a few points
-over-confident: where the engine says 55%, the truth is nearer 40%.
+The mid-range round-sufficiency probabilities remain a few points over-confident:
+where the engine says 55%, the truth is nearer 46%. That gap is a defect in the
+reconstruction of current immunity, not in the probability built on top of it.
+Supplying the true immunity and changing nothing else takes the round-count error
+from 1.37 to 0.78 and closes the mid-band to within two points. It closes by
+measuring immunity, not by tuning. See [`docs/RESEARCH_AGENDA.md`](docs/RESEARCH_AGENDA.md).
 
 Reproduce them:
 
@@ -250,7 +254,8 @@ Full contract: `src/immunity_engine/contracts.py`.
 1. **Round counts have not been validated against field outcomes.** They cannot
    be, without a location where the counterfactual was run. Every accuracy figure
    above comes from a simulated programme.
-2. **Prediction intervals are too wide.** The engine under-claims what it knows.
+2. **Prediction intervals still run wide.** The 80% round-count interval covers
+   about 88%. The engine under-claims what it knows.
 3. **Spatial transmission is not modelled.** Neighbouring locations are treated
    as independent. A location can reach the target and be reinfected from next
    door.

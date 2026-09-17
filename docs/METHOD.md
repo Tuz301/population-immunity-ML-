@@ -270,12 +270,14 @@ observed, because the counterfactual was not run.
 1. **Round counts have not been validated against field outcomes.** They cannot
    be, without a location where the counterfactual was run. Every accuracy figure
    in this repository comes from a simulated programme.
-2. **The two intervals miss in opposite directions.** On the simulated
-   programme, the 80% round-count interval covers the truth about 93% of the
-   time, so the engine under-claims what it knows there. The reach model's own
-   80% interval covers about 71% of held-out observations, so it over-claims.
-   Both are reported. Neither is tuned against the validation truth, because that
-   would be fitting to the test.
+2. **Both intervals still run wide, in the same direction.** On the simulated
+   programme, the 80% round-count interval covers the truth about 88% of the
+   time, and the reach model's 80% interval covers about 82% of held-out
+   observations. The engine under-claims what it knows in both. Both are
+   reported. Neither is tuned against the validation truth, because that would be
+   fitting to the test. Round-count coverage is steady across seeds at 88.4% plus
+   or minus 1.4, so it is the figure to steer a calibration change by; the Brier
+   score moves about 0.02 between seeds and cannot carry a smaller claim.
 3. **The engine does not model spatial transmission.** Two locations that share a
    border are treated as independent. A location can reach the target and still
    be reinfected from next door.
